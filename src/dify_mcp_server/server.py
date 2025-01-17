@@ -23,27 +23,48 @@ class DifyAPI(ABC):
         self.dify_apps = self.config.dify_apps
         self.user = user
 
-        # Set current app index
+        # Initialize collections for valid apps
+        self.dify_app_infos = []
+        self.dify_app_params = []
+        self.dify_app_metas = []
+        self._app_id_to_index = {}
+
+        for idx, app in enumerate(self.dify_apps):
+            try:
+                # Set headers for current app
+                self.headers = {
+                    "Authorization": f"Bearer {app['app_sk']}",
+                    "Content-Type": "application/json",
+                }
+
+                # Fetch app information
+                app_info = self.get_app_info()
+                app_params = self.get_app_parameters()
+                app_meta = self.get_app_meta()
+
+                # Store valid app information
+                self.dify_app_infos.append(app_info)
+                self.dify_app_params.append(app_params)
+                self.dify_app_metas.append(app_meta)
+
+                # Create internal mapping using app SK as unique identifier
+                self._app_id_to_index[app["app_sk"]] = idx
+
+            except requests.exceptions.RequestException as e:
+                print(f"Warning: Failed to initialize app {app['app_sk']}: {str(e)}")
+                continue
+
+        if not self.dify_app_infos:
+            raise ValueError("No valid apps were initialized")
+
+        # Set current app to first valid app
         self.current_app_index = 0
-
-        # Initialize headers property
         self._update_headers()
-
-        # dify app infos
-        dify_app_infos = []
-        dify_app_params = []
-        dify_app_metas = []
-        for app in self.dify_apps:
-            dify_app_infos.append(self.get_app_info())
-            dify_app_params.append(self.get_app_parameters())
-            dify_app_metas.append(self.get_app_meta())
-        self.dify_app_infos = dify_app_infos
-        self.dify_app_params = dify_app_params
-        self.dify_app_metas = dify_app_metas
-        self.dify_app_names = [x["name"] for x in dify_app_infos]
 
     def _update_headers(self):
         """Update headers with current app's API key."""
+        if self.current_app_index >= len(self.dify_apps):
+            raise ValueError("Invalid app index")
         current_app = self.dify_apps[self.current_app_index]
         self.headers = {
             "Authorization": f"Bearer {current_app['app_sk']}",
@@ -224,42 +245,36 @@ async def handle_list_tools() -> list[types.Tool]:
     Each tool specifies its arguments using JSON Schema validation.
     """
     tools = []
-    tool_names = dify_api.dify_app_names
-    tool_infos = dify_api.dify_app_infos
-    tool_params = dify_api.dify_app_params
-    tool_num = len(tool_names)
-    for i in range(tool_num):
-        # 0. load app info for each tool
-        app_info = tool_infos[i]
-        # 1. load app param for each tool
+
+    for i, app_info in enumerate(dify_api.dify_app_infos):
+        app_param = dify_api.dify_app_params[i]
+
+        # Create input schema
         inputSchema = dict(
             type="object",
             properties={},
             required=[],
         )
-        app_param = tool_params[i]
-        property_num = len(app_param["user_input_form"])
-        if property_num > 0:
-            for j in range(property_num):
-                param = app_param["user_input_form"][j]
-                # TODO: Add readme about strange dify user input param format
-                param_type = list(param.keys())[0]
-                param_info = param[param_type]
-                property_name = param_info["variable"]
-                inputSchema["properties"][property_name] = dict(
-                    type=param_type,
-                    description=param_info["label"],
-                )
-                if param_info["required"]:
-                    inputSchema["required"].append(property_name)
 
-        tools.append(
-            types.Tool(
-                name=app_info["name"],
-                description=app_info["description"],
-                inputSchema=inputSchema,
+        for param in app_param["user_input_form"]:
+            param_type = list(param.keys())[0]
+            param_info = param[param_type]
+            property_name = param_info["variable"]
+            inputSchema["properties"][property_name] = dict(
+                type=param_type,
+                description=param_info["label"],  # Use original label
             )
+            if param_info.get("required", False):
+                inputSchema["required"].append(property_name)
+
+        # Create tool using only the app name for display
+        tool = types.Tool(
+            name=app_info["name"],  # Use only the app name for display
+            description=app_info.get("description", "No description available"),
+            inputSchema=inputSchema,
         )
+        tools.append(tool)
+
     return tools
 
 
@@ -267,10 +282,14 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(
     name: str, arguments: dict | None
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    tool_names = dify_api.dify_app_names
-    if name in tool_names:
-        tool_idx = tool_names.index(name)
-        dify_api.set_current_app(tool_idx)  # Set the current app
+    # Find the app index by name
+    app_index = next(
+        (i for i, info in enumerate(dify_api.dify_app_infos) if info["name"] == name),
+        None,
+    )
+
+    if app_index is not None:
+        dify_api.set_current_app(app_index)
 
         # Call chat_message with the correct arguments
         responses = dify_api.chat_message(
