@@ -16,6 +16,7 @@ class DifyAPI(ABC):
     def __init__(self, config_path, user="default_user"):
         if not config_path:
             raise ValueError("config path not provided")
+        print(f"Initializing server with config path: {config_path}")
         self.config = OmegaConf.load(config_path)
 
         # dify configs
@@ -29,6 +30,8 @@ class DifyAPI(ABC):
         self.dify_app_metas = []
         self._app_id_to_index = {}
 
+        print(f"Initializing Dify API with {len(self.dify_apps)} apps")
+
         for idx, app in enumerate(self.dify_apps):
             try:
                 # Set headers for current app
@@ -37,10 +40,19 @@ class DifyAPI(ABC):
                     "Content-Type": "application/json",
                 }
 
+                print(f"Fetching info for app {app['app_sk'][-8:]}")
+
                 # Fetch app information
                 app_info = self.get_app_info()
                 app_params = self.get_app_parameters()
                 app_meta = self.get_app_meta()
+
+                # Add type information from config
+                app_info["type"] = app.get("type", "unknown")
+
+                print(
+                    f"Successfully initialized {app_info['name']} ({app_info['type']})"
+                )
 
                 # Store valid app information
                 self.dify_app_infos.append(app_info)
@@ -51,11 +63,26 @@ class DifyAPI(ABC):
                 self._app_id_to_index[app["app_sk"]] = idx
 
             except requests.exceptions.RequestException as e:
-                print(f"Warning: Failed to initialize app {app['app_sk']}: {str(e)}")
+                print(
+                    f"Warning: Failed to initialize app {app['app_sk'][-8:]}: {str(e)}"
+                )
+                if hasattr(e.response, "json"):
+                    try:
+                        error_details = e.response.json()
+                        print(f"Error details: {error_details}")
+                    except:
+                        pass
+                continue
+            except Exception as e:
+                print(
+                    f"Unexpected error initializing app {app['app_sk'][-8:]}: {str(e)}"
+                )
                 continue
 
         if not self.dify_app_infos:
             raise ValueError("No valid apps were initialized")
+
+        print(f"Successfully initialized {len(self.dify_app_infos)} apps")
 
         # Set current app to first valid app
         self.current_app_index = 0
@@ -83,27 +110,39 @@ class DifyAPI(ABC):
 
     def get_app_info(self) -> Dict[str, Any]:
         """Get current app info."""
-        url = f"{self.dify_base_url}/info"
-        params = {"user": self.user}
-        response = requests.get(url, headers=self.headers, params=params)
-        response.raise_for_status()
-        return response.json()
+        try:
+            url = f"{self.dify_base_url}/info"
+            params = {"user": self.user}
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching app info: {str(e)}")
+            raise
 
     def get_app_parameters(self) -> Dict[str, Any]:
         """Get current app parameters."""
-        url = f"{self.dify_base_url}/parameters"
-        params = {"user": self.user}
-        response = requests.get(url, headers=self.headers, params=params)
-        response.raise_for_status()
-        return response.json()
+        try:
+            url = f"{self.dify_base_url}/parameters"
+            params = {"user": self.user}
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching app parameters: {str(e)}")
+            raise
 
     def get_app_meta(self) -> Dict[str, Any]:
         """Get current app meta information."""
-        url = f"{self.dify_base_url}/meta"
-        params = {"user": self.user}
-        response = requests.get(url, headers=self.headers, params=params)
-        response.raise_for_status()
-        return response.json()
+        try:
+            url = f"{self.dify_base_url}/meta"
+            params = {"user": self.user}
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching app meta: {str(e)}")
+            raise
 
     def _construct_query(
         self, inputs: Dict[str, Any], app_parameters: Dict[str, Any]
@@ -233,7 +272,12 @@ class DifyAPI(ABC):
         return response.json()
 
 
+# Global instances
 config_path = os.getenv("CONFIG_PATH")
+if not config_path:
+    raise ValueError("CONFIG_PATH environment variable not set")
+
+print(f"Initializing server with config path: {config_path}")
 server = Server("dify_mcp_server")
 dify_api = DifyAPI(config_path)
 
@@ -291,9 +335,31 @@ async def handle_call_tool(
     if app_index is not None:
         dify_api.set_current_app(app_index)
 
-        # Call chat_message with the correct arguments
+        # Get app parameters for validation
+        app_param = dify_api.dify_app_params[app_index]
+
+        # Validate and process input arguments
+        processed_arguments = {}
+        if arguments:
+            for param in app_param["user_input_form"]:
+                param_type = list(param.keys())[0]
+                param_info = param[param_type]
+                param_name = param_info["variable"]
+
+                if param_name in arguments:
+                    value = arguments[param_name]
+                    # Validate select type parameters
+                    if param_type == "select" and "options" in param_info:
+                        valid_values = [opt["value"] for opt in param_info["options"]]
+                        if value not in valid_values:
+                            raise ValueError(
+                                f"{param_name} must be one of: {', '.join(valid_values)}"
+                            )
+                    processed_arguments[param_name] = value
+
+        # Call chat_message with the validated arguments
         responses = dify_api.chat_message(
-            inputs=arguments or {}, response_mode="streaming"
+            inputs=processed_arguments or {}, response_mode="streaming"
         )
 
         mcp_out = []
@@ -310,21 +376,44 @@ async def handle_call_tool(
 
 
 async def main():
-    # Run the server using stdin/stdout streams
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="dify_mcp_server",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    """Run the server using stdin/stdout streams"""
+    print("Starting Dify MCP server...")
+
+    try:
+        # Verify API connectivity before starting server
+        print("Verifying API connectivity...")
+        for idx, app in enumerate(dify_api.dify_app_infos):
+            print(f"Found tool: {app['name']} ({app.get('type', 'unknown')})")
+
+        print(f"Successfully verified {len(dify_api.dify_app_infos)} tools")
+
+        # Start server
+        print("Starting MCP server...")
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="dify_mcp_server",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    except Exception as e:
+        print(f"Server error: {str(e)}")
+        if hasattr(e, "__context__"):
+            print(f"Context: {str(e.__context__)}")
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nServer stopped by user")
+    except Exception as e:
+        print(f"Fatal error: {str(e)}")
+        raise
