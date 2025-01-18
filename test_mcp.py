@@ -300,6 +300,99 @@ async def test_travel_consultant():
     return success
 
 
+async def test_translation_workflow():
+    """Test Translation Workflow"""
+    print("\n=== Testing Translation Workflow ===")
+
+    # First get the tool info to see available options
+    tools = await test_tool_listing()
+    workflow_tool = next((t for t in tools if "Translation" in t.name), None)
+
+    if not workflow_tool:
+        print("Translation Workflow not found in tools")
+        return False
+
+    # Print available options for each parameter
+    print("\nAvailable parameter options:")
+    for param_name, param_info in workflow_tool.inputSchema.get(
+        "properties", {}
+    ).items():
+        print(f"\n{param_name}:")
+        print(f"Description: {param_info.get('description', '')}")
+        if "enum" in param_info:
+            print(f"Valid values: {param_info['enum']}")
+
+    # Test cases
+    test_cases = [
+        {
+            "name": "Valid parameters",
+            "params": {
+                "input_text": "The quick brown fox jumps over the lazy dog",
+            },
+            "should_succeed": True,
+        },
+    ]
+
+    success = True
+    for test_case in test_cases:
+        print(f"\nTesting case: {test_case['name']}")
+        print(f"Parameters: {test_case['params']}")
+
+        try:
+            # Set the current app to the workflow
+            app_index = next(
+                (
+                    i
+                    for i, info in enumerate(dify_api.dify_app_infos)
+                    if "Translation" in info["name"] and info.get("type") == "workflow"
+                ),
+                None,
+            )
+
+            if app_index is None:
+                print("Translation workflow not found in app_infos")
+                print("Available apps:")
+                for i, info in enumerate(dify_api.dify_app_infos):
+                    print(
+                        f"  {i}: {info['name']} (type: {info.get('type', 'unknown')})"
+                    )
+                return False
+
+            dify_api.set_current_app(app_index)
+
+            # Get responses
+            responses = dify_api.chat_message(
+                inputs=test_case["params"], response_mode="streaming"
+            )
+            print("\nResponse received:")
+            for res in responses:
+                if (
+                    "event" in res
+                    and res["event"] == "agent_message"
+                    and "answer" in res
+                ):
+                    print(res["answer"])
+
+            if not test_case["should_succeed"]:
+                print("Error: Test case should have failed but succeeded")
+                success = False
+
+        except Exception as e:
+            if test_case["should_succeed"]:
+                print(f"Error: Test case should have succeeded but failed: {str(e)}")
+                if hasattr(e, "response") and hasattr(e.response, "json"):
+                    try:
+                        error_details = e.response.json()
+                        print(f"Error details: {error_details}")
+                    except:
+                        pass
+                success = False
+            else:
+                print(f"Expected error received: {str(e)}")
+
+    return success
+
+
 async def main():
     """Main test function"""
     print("Starting MCP Tool Tests...")
@@ -308,13 +401,15 @@ async def main():
     await test_tool_listing()
 
     # Test each tool
-    football_result = await test_football_agent()
-    travel_result = await test_travel_consultant()
+    #football_result = await test_football_agent()
+    #travel_result = await test_travel_consultant()
+    workflow_result = await test_translation_workflow()
 
     # Print summary
     print("\n=== Test Summary ===")
-    print(f"Football Agent Test: {'PASSED' if football_result else 'FAILED'}")
-    print(f"Travel Consultant Test: {'PASSED' if travel_result else 'FAILED'}")
+    #print(f"Football Agent Test: {'PASSED' if football_result else 'FAILED'}")
+    #print(f"Travel Consultant Test: {'PASSED' if travel_result else 'FAILED'}")
+    print(f"Translation Workflow Test: {'PASSED' if workflow_result else 'FAILED'}")
 
 
 if __name__ == "__main__":

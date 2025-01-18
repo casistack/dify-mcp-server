@@ -192,26 +192,38 @@ class DifyAPI(ABC):
             # Get app parameters for proper input handling
             app_parameters = self.get_app_parameters()
 
-            # Construct the natural language query
-            query = self._construct_query(inputs, app_parameters)
+            # Get current app info
+            current_app = self.dify_apps[self.current_app_index]
+            app_type = current_app.get(
+                "type", "agent"
+            )  # Default to agent for backward compatibility
 
             # Prepare request data
             data = {
                 "inputs": inputs,
-                "query": query,
                 "response_mode": response_mode,
                 "user": user or "default-user",
             }
 
-            if conversation_id:
+            # Add conversation_id for agents/chatbots
+            if app_type != "workflow" and conversation_id:
                 data["conversation_id"] = conversation_id
 
+            # Add files if provided
             if files:
                 data["files"] = files
 
-            # Make request to chat-messages endpoint
+            # Add query for agents/chatbots
+            if app_type != "workflow":
+                query = self._construct_query(inputs, app_parameters)
+                data["query"] = query
+
+            # Choose endpoint based on type
+            endpoint = "/workflows/run" if app_type == "workflow" else "/chat-messages"
+
+            # Make request to appropriate endpoint
             response = requests.post(
-                f"{self.dify_base_url}/chat-messages",
+                f"{self.dify_base_url}{endpoint}",
                 headers=self.headers,
                 json=data,
                 stream=response_mode == "streaming",
@@ -219,7 +231,7 @@ class DifyAPI(ABC):
             response.raise_for_status()
 
             if response_mode == "streaming":
-                return self._handle_streaming_response(response)
+                return self._handle_streaming_response(response, app_type)
             else:
                 return response.json()
 
@@ -234,7 +246,7 @@ class DifyAPI(ABC):
             raise Exception(error_msg)
 
     def _handle_streaming_response(
-        self, response: requests.Response
+        self, response: requests.Response, app_type: str = "agent"
     ) -> Generator[Dict[str, Any], None, None]:
         """Handle streaming response from Dify API."""
         for line in response.iter_lines():
@@ -244,7 +256,20 @@ class DifyAPI(ABC):
                     line = line[6:]
                 try:
                     event = json.loads(line)
-                    yield event
+
+                    # For workflows, extract text content from various events
+                    if app_type == "workflow":
+                        if event.get("event") == "text_chunk" and "data" in event:
+                            # Reformat as agent_message for consistency
+                            yield {
+                                "event": "agent_message",
+                                "answer": event["data"].get("text", ""),
+                            }
+                        elif event.get("event") == "workflow_finished":
+                            yield {"event": "message_end"}
+                    else:
+                        # Pass through agent/chatbot events as is
+                        yield event
                 except json.JSONDecodeError as e:
                     print(f"Error decoding JSON from stream: {e}")
                     continue
@@ -311,9 +336,9 @@ async def handle_list_tools() -> list[types.Tool]:
             if param_info.get("required", False):
                 inputSchema["required"].append(property_name)
 
-        # Create tool using only the app name for display
+        # Create tool using only the app name for display, with whitespace trimmed
         tool = types.Tool(
-            name=app_info["name"],  # Use only the app name for display
+            name=app_info["name"].strip(),  # Trim whitespace from name
             description=app_info.get("description", "No description available"),
             inputSchema=inputSchema,
         )
@@ -326,9 +351,13 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(
     name: str, arguments: dict | None
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    # Find the app index by name
+    # Find the app index by name, with whitespace trimming
     app_index = next(
-        (i for i, info in enumerate(dify_api.dify_app_infos) if info["name"] == name),
+        (
+            i
+            for i, info in enumerate(dify_api.dify_app_infos)
+            if info["name"].strip() == name.strip()
+        ),
         None,
     )
 
