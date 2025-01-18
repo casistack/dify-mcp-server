@@ -335,31 +335,9 @@ async def handle_call_tool(
     if app_index is not None:
         dify_api.set_current_app(app_index)
 
-        # Get app parameters for validation
-        app_param = dify_api.dify_app_params[app_index]
-
-        # Validate and process input arguments
-        processed_arguments = {}
-        if arguments:
-            for param in app_param["user_input_form"]:
-                param_type = list(param.keys())[0]
-                param_info = param[param_type]
-                param_name = param_info["variable"]
-
-                if param_name in arguments:
-                    value = arguments[param_name]
-                    # Validate select type parameters
-                    if param_type == "select" and "options" in param_info:
-                        valid_values = [opt["value"] for opt in param_info["options"]]
-                        if value not in valid_values:
-                            raise ValueError(
-                                f"{param_name} must be one of: {', '.join(valid_values)}"
-                            )
-                    processed_arguments[param_name] = value
-
-        # Call chat_message with the validated arguments
+        # Call chat_message with the arguments
         responses = dify_api.chat_message(
-            inputs=processed_arguments or {}, response_mode="streaming"
+            inputs=arguments or {}, response_mode="streaming"
         )
 
         mcp_out = []
