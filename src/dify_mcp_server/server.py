@@ -364,18 +364,36 @@ async def handle_call_tool(
     if app_index is not None:
         dify_api.set_current_app(app_index)
 
+        # Get app type
+        current_app = dify_api.dify_apps[app_index]
+        app_type = current_app.get(
+            "type", "agent"
+        )  # Default to agent for backward compatibility
+
+        # Use streaming for agents, blocking for workflows
+        response_mode = "blocking" if app_type == "workflow" else "streaming"
+
         # Call chat_message with the arguments
         responses = dify_api.chat_message(
-            inputs=arguments or {}, response_mode="streaming"
+            inputs=arguments or {}, response_mode=response_mode
         )
 
         mcp_out = []
-        for res in responses:
-            if "event" in res:
-                if res["event"] == "agent_message" and "answer" in res:
-                    mcp_out.append(types.TextContent(type="text", text=res["answer"]))
-                elif res["event"] == "message_end":
-                    break
+        if response_mode == "streaming":
+            for res in responses:
+                if "event" in res:
+                    if res["event"] == "agent_message" and "answer" in res:
+                        mcp_out.append(
+                            types.TextContent(type="text", text=res["answer"])
+                        )
+                    elif res["event"] == "message_end":
+                        break
+        else:
+            # For blocking mode, handle the single response
+            if isinstance(responses, dict):
+                answer = responses.get("answer", "")
+                if answer:
+                    mcp_out.append(types.TextContent(type="text", text=answer))
 
         return mcp_out
     else:
